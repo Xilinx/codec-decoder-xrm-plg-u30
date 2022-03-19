@@ -20,13 +20,16 @@
  *
  * Populate json string input to local structure
  * ------------------------------------------------------------------------------------------------------------------------------------------*/
-bool _populate_data( const char* input, std::vector<ResourceData*> &m_resources, std::vector<ParamsData*> &m_params)
+static int _populate_dec_data( const char* input, std::vector<ResourceData*> &m_resources, std::vector<ParamsData*> &m_params, char* child_resource)
 {
+    syslog(LOG_NOTICE, "%s(): \n", __func__);
     stringstream job_str;
     pt::ptree job_tree;
 
     job_str<<input;
     boost::property_tree::read_json(job_str, job_tree);
+    m_resources.clear();
+    m_params.clear();
 
     try
     {
@@ -42,10 +45,12 @@ bool _populate_data( const char* input, std::vector<ResourceData*> &m_resources,
       m_params.push_back(paramVal);
 
       // parse resources
-      for (auto it1 : job_tree.get_child("request.parameters.resources."))
+      if ( pr_ptree.find(child_resource) != pr_ptree.not_found()) 
       {
-           auto res_ptree = it1.second;
-           auto resource = new ResourceData;
+         for (auto it1 : pr_ptree.get_child(child_resource))
+         {
+              auto res_ptree = it1.second;
+              auto resource = new ResourceData;
 
               resource->function = res_ptree.get<std::string>("function");
               resource->format = res_ptree.get<std::string>("format");
@@ -58,89 +63,33 @@ bool _populate_data( const char* input, std::vector<ResourceData*> &m_resources,
               resource->in_res.height = res_ptree.get<int32_t>("resolution.input.height");
               resource->in_res.frame_rate.numerator = res_ptree.get<int32_t>("resolution.input.frame-rate.num");
               resource->in_res.frame_rate.denominator = res_ptree.get<int32_t>("resolution.input.frame-rate.den");      
-              if (resource->function == "ENCODER")
-              {
-                 auto it_la = res_ptree.find("lookahead-load");
-                 if (it_la != res_ptree.not_found())
-                    resource->lookahead_load = res_ptree.get<int32_t>("lookahead-load");
-                 else
-                    resource->lookahead_load = 0;
-              }
-              if (resource->function == "SCALER")
-              {
-                 for (auto it2 : res_ptree.get_child("resolution.output."))
-                 {
-                     Resolution outRes;
-                     auto out_tree = it2.second;
-                     outRes.width = out_tree.get<int32_t>("width");
-                     outRes.height = out_tree.get<int32_t>("height");
-                     outRes.frame_rate.numerator = out_tree.get<int32_t>("frame-rate.num");
-                     outRes.frame_rate.denominator = out_tree.get<int32_t>("frame-rate.den");
-                     resource->out_res.push_back(outRes);
-                 }
-              }
               m_resources.push_back(resource);
-      }    
+         }  
+      } 
+      else if (strcmp(child_resource, "additionalresources_1")==0)
+         return 0;
     }
     catch (std::exception &e)
     {
         syslog(LOG_NOTICE, "%s Exception: %s\n", __func__, e.what());
-        return false;
+        return -1;
     }
 
-    return true;
+    return 1;
 }
 
 
-/*------------------------------------------------------------------------------------------------------------------------------------------
- *
- * XRM API version check
- * ------------------------------------------------------------------------------------------------------------------------------------------*/
-int32_t xrmU30DecPlugin_api_version(void)
-{ 
-  syslog(LOG_NOTICE, "%s(): API version: %d\n", __func__, XRM_API_VERSION_1);
-  return (XRM_API_VERSION_1);
-}
-
-/*------------------------------------------------------------------------------------------------------------------------------------------
- *
- * XRM Plugin ID check
- * ------------------------------------------------------------------------------------------------------------------------------------------*/
-int32_t xrmU30DecPlugin_get_plugin_id(void) 
-{
-  syslog(LOG_NOTICE, "%s(): xrm plugin example id is %d\n", __func__, XRM_PLUGIN_U30_DEC_ID);
-  return (XRM_PLUGIN_U30_DEC_ID); 
-}
-
-/*------------------------------------------------------------------------------------------------------------------------------------------
- * 
- * XRM U30 decoder plugin for load calculation
- * Expected json format string in ResourceData structure format.
- * ------------------------------------------------------------------------------------------------------------------------------------------*/
-
-int32_t xrmU30DecPlugin_calcPercent(xrmPluginFuncParam* param)
+static void _calc_dec_load_res( char* output, std::vector<ResourceData*> &m_resources, std::vector<ParamsData*> &m_params)
 {
    syslog(LOG_NOTICE, "%s(): \n", __func__);
 
    int calc_percentage[MAX_OUT_ELEMENTS] = {0}, idx=0; 
    int calc_load = 0, global_calc_load= 0;
-   bool outstat;
    uint32_t rounding = 0, frame_rate = 0;
    unsigned int calc_aggregate = 0, parse_aggregate = 0;
    char temp[1024];
    int32_t global_job_cnt = -1;
 
-   std::vector<ResourceData*>  m_resources;
-   std::vector<ParamsData*>  m_params;
-
-   outstat = _populate_data( param->input, m_resources, m_params);
-
-   if (outstat == false)
-   {
-      syslog(LOG_NOTICE, "%s(): failure in parsing json input\n", __func__);
-      return XRM_ERROR;      
-   }    
- 
    for (auto res : m_resources)
    {
        if (res->function == "DECODER")
@@ -186,18 +135,74 @@ int32_t xrmU30DecPlugin_calcPercent(xrmPluginFuncParam* param)
 
    //Parsed job-count to be used if it limits channels to less than the calculated. 
    if ((global_calc_load > calc_aggregate) && (global_calc_load <= XRM_MAX_CU_LOAD_GRANULARITY_1000000))
-      sprintf( param->output,"%d ",global_calc_load);
+      sprintf( temp,"%d ",global_calc_load);   
    else
    {
       if ((parse_aggregate > calc_aggregate) && (parse_aggregate <= XRM_MAX_CU_LOAD_GRANULARITY_1000000))// Parse channel-load to be depricated by GA-2
-         sprintf( param->output,"%d ",parse_aggregate); 
-      else
-         sprintf( param->output,"%d ",calc_aggregate);
-   }
-    
-   sprintf( temp,"%d",idx); 
-   strcat(param->output,temp);
+         sprintf( temp,"%d ",parse_aggregate); 
+      else   
+         sprintf( temp,"%d ",calc_aggregate);      
+   }   
+   strcat(output,temp);
+   sprintf( temp,"%d ",idx);   
+   strcat(output,temp);
+}
 
+/*------------------------------------------------------------------------------------------------------------------------------------------
+ *
+ * XRM API version check
+ * ------------------------------------------------------------------------------------------------------------------------------------------*/
+int32_t xrmU30DecPlugin_api_version(void)
+{ 
+  syslog(LOG_NOTICE, "%s(): API version: %d\n", __func__, XRM_API_VERSION_1);
+  return (XRM_API_VERSION_1);
+}
+
+/*------------------------------------------------------------------------------------------------------------------------------------------
+ *
+ * XRM Plugin ID check
+ * ------------------------------------------------------------------------------------------------------------------------------------------*/
+int32_t xrmU30DecPlugin_get_plugin_id(void) 
+{
+  syslog(LOG_NOTICE, "%s(): xrm plugin example id is %d\n", __func__, XRM_PLUGIN_U30_DEC_ID);
+  return (XRM_PLUGIN_U30_DEC_ID); 
+}
+
+/*------------------------------------------------------------------------------------------------------------------------------------------
+ * 
+ * XRM U30 decoder plugin for load calculation
+ * Expected json format string in ResourceData structure format.
+ * ------------------------------------------------------------------------------------------------------------------------------------------*/
+
+int32_t xrmU30DecPlugin_calcPercent(xrmPluginFuncParam* param)
+{
+   syslog(LOG_NOTICE, "%s(): \n", __func__);
+
+   std::vector<ResourceData*>  m_resources;
+   std::vector<ParamsData*>  m_params;
+   strcpy(param->output, "");
+   int nres= 0, max_nres=2, outstat=-1;
+
+   for (nres=0; nres<2; )
+   {
+
+      if (nres==0)
+         outstat = _populate_dec_data( param->input, m_resources, m_params, "resources");   
+      else
+         outstat = _populate_dec_data( param->input, m_resources, m_params, "additionalresources_1");   
+
+      if (outstat == -1)
+      {
+         syslog(LOG_NOTICE, "%s(): failure in parsing json input\n", __func__);
+         return XRM_ERROR;      
+      }
+      else if (outstat ==0) //No additional resources given so don't add any to param output
+         return XRM_SUCCESS;    
+       
+      _calc_dec_load_res( param->output, m_resources, m_params);
+
+      nres++;
+   }
  
    return XRM_SUCCESS;
 }
